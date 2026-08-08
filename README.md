@@ -24,6 +24,8 @@ the verb is being used in a wider range of meanings.
 | `phase4c_logratio_layers.py` | Reproduces **Fig. 4**: raw κ difference vs. scale-free log-ratio `ln(κ_A1/κ_B1+)` across all layers for the three verbs. Reads `kappa_all_layers.csv` (from phase3); no BERT run needed. |
 | `phase4d_metric_robustness.py` | Reproduces **Fig. 5** (§5.6): vMF κ vs. mean pairwise cosine distance scatter, per verb, with the Pearson correlation r in the legend. Reads `dispersion_all.csv` (from phase4b); no BERT run needed. |
 | `phase5_logratio.py` | Supplementary analysis, kept in the package (not the Fig. 4 code): the log-ratio between CEFR levels at each verb's anchor layer with essay-level bootstrap CIs, to test whether a pair's log-ratio excludes 0. |
+| `phase6a_extract_collocations.py` | Dependency-parse pass over the same sentences (spaCy only, no BERT). Classifies what each target verb takes as its complement — noun object, pronoun, gerund, infinitive, clausal, predicate adjective, particle-only, and so on — and writes per-occurrence data plus frequency tables to `output/extract_constructions.xlsx`. |
+| `phase6b_collocation_analysis.ipynb` | The qualitative layer of the study. Reads that workbook and works through it verb by verb: category share across A1/A2/B1+, the noun and verbal collocates that rise or fall most between levels, the example sentences behind each, breakdowns by essay topic, and HD-D over the collocate lists as a type-diversity check. |
 | `JEFLL_ten_verbs.csv` | Input data (see format below). |
 
 The phases share one design choice: analysis is done per essay (via the `file`
@@ -44,6 +46,8 @@ numpy
 pandas
 matplotlib
 ```
+
+Phase 6 additionally needs `openpyxl`, `plotly`, and `lexicalrichness`.
 
 ## Installation
 
@@ -97,6 +101,10 @@ Each phase depends on outputs of earlier ones — `phase4c` reads the kappa tabl
 (`output/dispersion_all.csv`) from `phase4b`, and `phase3b` / `phase5` use the anchor
 layers reported by `phase2`. `phase5` is a retained supplementary analysis and is not
 required to reproduce the figures.
+
+`phase6a` and `phase6b` sit outside this chain: `phase6a` re-reads the same CSV and
+depends on no earlier output, so it can be run at any point, and `phase6b` needs only
+the workbook `phase6a` writes.
 
 ### 1. Probing — find the peak layer (`phase2`)
 
@@ -188,6 +196,35 @@ phase3b. Outputs: `output/logratio_ci.csv`, `output/logratio_ci.png`.
 
 Note: `like` has two probing peaks (L2 and L11). Run it once per anchor to check
 both, e.g. `--layers like=2` and `--layers like=11`.
+
+### 6. Collocation and complementation analysis (`phase6a`, `phase6b`)
+
+```bash
+python phase6a_extract_collocations.py --csv JEFLL_ten_verbs.csv --verbs take make like
+```
+
+Where the κ analysis asks how widely each verb's contextual vectors are spread, this
+phase asks what that spread consists of in surface terms. `phase6a` parses every
+sentence with spaCy and assigns each target verb occurrence a single complementation
+category, so that `take part`, `take to swim`, `take off` and an intransitive `take`
+are counted separately rather than collapsed. Antecedents of object-gap relative
+clauses ("the bread that I make") are recovered as noun objects instead of being lost
+as pronouns, and coordinated nouns ("rice and bread") are counted in the collocate
+table without inflating the category totals.
+
+Outputs: `output/constructions_all.csv`, `output/category_summary.csv`,
+`output/relativization_summary.csv`, and `output/extract_constructions.xlsx` with
+sheets `raw_all`, `category_summary`, `noun_collocates`, `verbal_complements`, and
+`relativization_summary`.
+
+`phase6b_collocation_analysis.ipynb` is the analysis that was actually run over that
+workbook for the study, kept as a notebook because the reasoning is exploratory rather
+than a fixed figure script. It plots each verb's category share across the three
+levels, ranks collocates by how much their share shifts between A1 and B1+, prints
+sampled example sentences for the collocates that move most, checks how far a
+collocate is driven by essay topic rather than proficiency, and computes HD-D over the
+collocate lists as a sample-size-independent diversity measure. Run the cells in order;
+it reads the workbook and writes nothing.
 
 ## Common options
 
