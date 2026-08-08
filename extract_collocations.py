@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 """
-extract_constructions.py
-========================
 This script classifies the complementation patterns of the target verbs (take / make / like) 
 and exports frequency tables to Excel.
 
