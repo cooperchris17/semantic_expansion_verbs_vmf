@@ -1,7 +1,10 @@
 # Layer-wise Verb Semantics in L2 Writing (BERT + vMF)
 
-Code accompanying the study on how the semantic dispersion of basic verbs changes
-across CEFR levels in learner English, measured layer by layer in BERT.
+Code accompanying the following study:
+Tono, Y. & Cooper, C. R. (2026). Verb-Specific Timing of Semantic Expansion Across CEFR Levels: A Layer-wise von Mises–Fisher Analysis of Learner English. _APCLC2026 Proceedings_
+
+The sentence dataset was extracted from the JEFLL corpus: 
+Tono, Y. (2007). Nihonjin chūkōsei ichiman-nin no eigo kōpasu: JEFLL Corpus [An English corpus of 10,000 Japanese junior and senior high school students: The JEFLL Corpus]. Tokyo: Shogakukan.<img width="468" height="35" alt="image" src="https://github.com/user-attachments/assets/9759c60f-8ddb-4442-b485-2edb7356fd89" />
 
 For each target verb, the pipeline extracts the verb-token vector from all 13
 BERT layers, then quantifies how "spread out" those vectors are at each CEFR
