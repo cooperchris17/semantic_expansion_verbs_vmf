@@ -197,20 +197,19 @@ phase3b. Outputs: `output/logratio_ci.csv`, `output/logratio_ci.png`.
 Note: `like` has two probing peaks (L2 and L11). Run it once per anchor to check
 both, e.g. `--layers like=2` and `--layers like=11`.
 
-### 6. Collocation and complementation analysis (`phase6a`, `phase6b`)
+### 6. Collocation analysis (`phase6a`, `phase6b`)
 
 ```bash
 python phase6a_extract_collocations.py --csv JEFLL_ten_verbs.csv --verbs take make like
 ```
 
-Where the κ phases measure how widely each verb's vectors are spread, this one asks
-what that spread consists of in surface terms. `phase6a` relies on `shared_utils.py`
-for the data loading and spaCy parsing, then assigns each verb occurrence a single
-complementation category, so `take part`, `take to swim` and `take off` are counted
-separately rather than collapsed. Outputs: `output/constructions_all.csv`,
-`output/category_summary.csv`, `output/relativization_summary.csv`, and
-`output/extract_constructions.xlsx` (sheets `raw_all`, `category_summary`,
-`noun_collocates`, `verbal_complements`, `relativization_summary`).
+`phase6a` relies on `shared_utils.py` for the data loading and spaCy parsing, then 
+assigns each verb occurrence a single complementation category, so `take part`, 
+`take to swim` and `take off` are counted separately rather than collapsed. 
+Outputs: `output/constructions_all.csv`, `output/category_summary.csv`, 
+`output/relativization_summary.csv`, and `output/extract_constructions.xlsx` 
+(sheets `raw_all`, `category_summary`, `noun_collocates`, `verbal_complements`, 
+`relativization_summary`).
 
 `phase6b_collocation_analysis.ipynb` reads that workbook: category share by level,
 collocates ranked by how far their share shifts between A1 and B1+, sampled example
