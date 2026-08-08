@@ -1,44 +1,36 @@
 # -*- coding: utf-8 -*-
 """
 extract_constructions.py
-=========================
-対象動詞（take / make / like）が取る補文・目的語のパターンを、
-名詞目的語だけでなく動名詞・不定詞・節・等位接続・受動態主語・
-述語形容詞・句動詞まで含めて分類し、頻度表を Excel に出力する。
+========================
+This script classifies the complementation patterns of the target verbs (take / make / like) 
+and exports frequency tables to Excel.
 
-collocate_freq.py（旧版）との違い:
-  旧版は dobj/attr/pobj の NOUN/PROPN しか見ておらず、それ以外の文は
-  .dropna(subset=["noun"]) で無言で捨てられていた。
-  本スクリプトは同じ動詞トークンの子ノードを見て、以下すべてを分類する:
+    noun / proper_noun    nominal object (dobj, attr, pobj, dative)
+    coordinated_noun      noun coordinated with the above ("rice and bread")
+    pronoun               pronominal object ("like it")
+    gerund                gerundial complement (xcomp, VBG; "like swimming")
+    infinitive            infinitival complement (xcomp, VB; "like to swim")
+    clausal               clausal complement (ccomp; "like that we can ...")
+    predicate_adjective   adjectival complement (acomp; "make sure")
+    passive_subject       subject of a passive ("bread was made")
+    phrasal_only          no nominal or clausal argument, particle only ("take off")
+    none                  none of the above
 
-    noun / proper_noun     : 名詞目的語（dobj, attr, pobj, dative）
-    coordinated_noun       : 上記に等位接続された追加の名詞（"rice and bread"）
-    pronoun                : 代名詞目的語（"like it"）
-    gerund                 : 動名詞補文（xcomp, VBG）（"like swimming"）
-    infinitive              : 不定詞補文（xcomp, VB）（"like to swim"）
-    clausal                : 節補文（ccomp）（"like that we can..."）
-    predicate_adjective    : 形容詞補語（acomp）（"make sure"）
-    passive_subject        : 受動態の主語（nsubjpass）（"bread was made"）
-    phrasal_only           : 名詞・節等は無いが不変化詞のみ（"take off"）
-    none                   : 上記いずれも無し（自動詞的・省略）
+Each verb token gets a single primary category, chosen by CONSTRUCTION_PRIORITY
+(most informative first). Coordinated nouns other than the primary one are
+counted only in the noun collocate table, so category counts are not inflated.
+Only the first occurrence of the target verb in a sentence is analysed.
 
-  各動詞トークンにつき「最も情報量の高い」1カテゴリを主カテゴリとして
-  記録する（優先順位は CONSTRUCTION_PRIORITY を参照）。等位接続された
-  追加の名詞は主カテゴリとは別に、名詞コロケート頻度表にのみ加算する
-  （カテゴリ集計を二重計上しないため）。
+Outputs (all under output/):
+  constructions_all.csv        one row per verb occurrence
+  category_summary.csv         category counts and percentages by verb x level
+  relativization_summary.csv   relative-clause object recoveries by verb x level
+  extract_constructions.xlsx   the above as sheets, plus:
+      raw_all                  full raw data
+      noun_collocates          noun + proper_noun + coordinated_noun frequencies
+      verbal_complements       gerund and infinitive complement frequencies
 
-  1文につき、対象動詞の最初の出現のみを見る（旧版と同じ制約）。
-
-出力（すべて output/ 以下）:
-  constructions_all.csv      : 動詞出現ごとの生データ（文・カテゴリ・コロケート）
-  category_summary.csv       : 動詞×レベル×カテゴリの頻度・割合
-  extract_constructions.xlsx : 上記をまとめた Excel ブック
-      - raw_all              : 生データ全件
-      - category_summary     : カテゴリ別頻度・割合（ピボット）
-      - noun_collocates      : 名詞コロケート頻度表（noun + proper_noun + coordinated_noun）
-      - verbal_complements   : 動名詞・不定詞補文の頻度表
-
-使い方:
+Usage:
   python extract_constructions.py --csv JEFLL_ten_verbs.csv --verbs take make like
 """
 
@@ -53,8 +45,9 @@ from shared_utils import load_data_with_ids, load_spacy
 
 TARGET_LEVELS = ["A1", "A2", "B1+"]
 
-# 主カテゴリを決めるときの優先順位（上にあるほど優先）。
-# phrasal_only / none はここに含めない（candidates が空のときのフォールバックとして別処理）。
+# Order in which the primary category is chosen (earlier = higher priority).
+# phrasal_only / none are not listed: they are the fallback when no candidate
+# is found at all.
 CONSTRUCTION_PRIORITY = [
     "noun", "proper_noun", "pronoun", "coordinated_noun",
     "gerund", "infinitive", "clausal",
@@ -67,8 +60,8 @@ VERBAL_CATEGORIES = {"gerund", "infinitive"}
 
 def extract_constructions(sentences, verb, nlp):
     """
-    sentences（"文" または (文, 作文ID) タプルのリスト）から、対象動詞の
-    出現ごとに構文カテゴリを分類した dict のリストを返す。
+    Classify each occurrence of `verb` in `sentences` (a list of strings, or of
+    (sentence, file_id) tuples) and return one dict per occurrence.
     """
     contexts = []
     for item in sentences:
@@ -86,30 +79,30 @@ def extract_constructions(sentences, verb, nlp):
             candidates = []  # [(category, text_or_None), ...]
             relativized = False
 
-            # 関係節の目的語ギャップ処理:
-            # token（対象動詞）自身が関係節の述語（dep_=="relcl"）で、
-            # かつ節内に主語（nsubj/nsubjpass）が既にある場合、
-            # 欠けている項は目的語である可能性が高い。
-            # この場合 token.head が先行詞（=真の意味的目的語）なので、
-            # "that/which"（またはゼロ関係代名詞）を pronoun として拾うのではなく
-            # 先行詞そのものを noun/proper_noun として回収する。
-            # 例: "the bread that I make" → make.dep_=="relcl", make.head=="bread"
-            #     "the man who makes bread" → makes.dep_=="relcl" だが主語ギャップ
-            #     （who が nsubj）なので対象外。bread は通常の dobj で拾われる。
+            # Relative-clause object gap.
+            # If the target verb heads a relative clause (dep_ == "relcl") that
+            # already contains a subject, the missing argument is most likely the
+            # object, and token.head is the antecedent, i.e. the real semantic
+            # object. Recover the antecedent as noun/proper_noun rather than
+            # counting "that"/"which" as a pronoun.
+            #   "the bread that I make"   -> relcl, head "bread": object gap.
+            #   "the man who makes bread" -> relcl, but "who" is the subject, so
+            #                                this is a subject gap and is skipped;
+            #                                "bread" is caught as an ordinary dobj.
             if token.dep_ == "relcl" and token.head.pos_ in {"NOUN", "PROPN"}:
-                # 主語が「関係代名詞自身」(who/that, tag_=="WP"/"WDT") なら主語関係節
-                # （例: "the man WHO makes bread" — who が主語）なので対象外。
+                # A wh-word subject (who/that, WP/WDT) marks a subject relative
+                # clause, so there is no object gap to recover.
                 subject_is_wh = any(
                     c.dep_ in {"nsubj", "nsubjpass"} and c.tag_ in {"WP", "WDT"}
                     for c in token.children
                 )
-                # 通常の（wh でない）主語があるか（例: "the bread that I make" の I）
+                # An ordinary, non-wh subject, e.g. "I" in "the bread that I make".
                 has_real_subject = any(
                     c.dep_ in {"nsubj", "nsubjpass"} and c.tag_ not in {"WP", "WDT"}
                     for c in token.children
                 )
-                # 目的語スロットが既に実質名詞で埋まっていないか
-                # （埋まっていれば関係節の欠落項は目的語ではない＝別の関係、例: 副詞的関係節）
+                # If the object slot is already filled by a real noun, the gap is
+                # not an object gap (e.g. an adverbial relative clause).
                 object_slot_filled = any(
                     c.dep_ in {"dobj", "attr", "pobj", "dative"}
                     and c.pos_ in {"NOUN", "PROPN"}
@@ -137,9 +130,9 @@ def extract_constructions(sentences, verb, nlp):
                             if conj.pos_ in {"NOUN", "PROPN"}:
                                 candidates.append(("coordinated_noun", conj.text.lower()))
                     elif child.pos_ == "PRON":
-                        # relativized=True の場合、この PRON は "that/which" 等の
-                        # 関係代名詞（先行詞は上ですでに回収済み）である可能性が高いので、
-                        # 別途 pronoun として二重計上しない。
+                        # If relativized, this PRON is most likely the relative
+                        # pronoun whose antecedent was recovered above, so it is
+                        # not counted again as a pronoun object.
                         if not relativized:
                             candidates.append(("pronoun", child.text.lower()))
 
@@ -158,7 +151,7 @@ def extract_constructions(sentences, verb, nlp):
                 elif child.dep_ == "nsubjpass":
                     candidates.append(("passive_subject", child.text.lower()))
 
-            # 主カテゴリ = 優先順位に沿って最初に見つかったもの
+            # Primary category = first match in priority order.
             primary = None
             for cat in CONSTRUCTION_PRIORITY:
                 match = next((c for c in candidates if c[0] == cat), None)
@@ -171,7 +164,7 @@ def extract_constructions(sentences, verb, nlp):
 
             category, collocate = primary
 
-            # 主カテゴリ以外の等位接続名詞（名詞コロケート表にのみ使う）
+            # Coordinated nouns other than the primary one: noun collocate table only.
             extra_nouns = [c[1] for c in candidates
                            if c[0] == "coordinated_noun" and c != primary]
 
@@ -186,13 +179,13 @@ def extract_constructions(sentences, verb, nlp):
                 "extra_nouns": "; ".join(extra_nouns) if extra_nouns else None,
                 "relativized": relativized,
             })
-            break  # 1文につき最初の1箇所だけ
+            break  # only the first occurrence per sentence
 
     return contexts
 
 
 def build_all_contexts(csv_path, verbs, nlp):
-    """全動詞・全レベルについて extract_constructions を実行し、長形式 DataFrame を返す。"""
+    """Run extract_constructions over all verbs and levels; return a long DataFrame."""
     data = load_data_with_ids(csv_path)
     rows = []
     for verb in verbs:
@@ -213,36 +206,37 @@ def build_all_contexts(csv_path, verbs, nlp):
 
 def load_topics(csv_path):
     """
-    元の CSV に topic 列があれば (file_id, sentence) -> topic のルックアップ用
-    DataFrame を返す。無ければ None（呼び出し側で attach_topics がスキップする）。
-    file_id は load_data_with_ids 側と型を揃えるため文字列に統一しておく
-    （int64 vs object の不一致で merge が落ちるのを防ぐ）。
+    Return a (file_id, sentence) -> topic lookup table, or None if the source CSV
+    has no 'topic' column (attach_topics then skips the join).
 
-    注意: 元 CSV は (verb, sentence) ごとに1行なので、1文に対象動詞が複数
-    含まれる場合（例: "I take money and make food"）は同じ (file_id, sentence)
-    が複数行に渡って重複する。重複したまま merge すると行が意図せず増える
-    （fan-out）ため、ここで (file_id, sentence) を一意化してから返す。
+    file_id is cast to str to match load_data_with_ids; an int64/object mismatch
+    would otherwise break the merge.
+
+    The source CSV has one row per (verb, sentence), so a sentence containing
+    more than one target verb ("I take money and make food") appears on several
+    rows with the same (file_id, sentence). Those duplicates are collapsed here
+    to keep the merge one-to-one and avoid fan-out.
     """
     df = pd.read_csv(csv_path)
     df.columns = df.columns.str.lower().str.strip()
     if "topic" not in df.columns:
-        print("ℹ️ CSV に 'topic' 列が見つからないため、トピック情報はスキップします。")
+        print("ℹ️ No 'topic' column found in the CSV; topic metadata will be skipped.")
         return None
     topics = df[["file", "sentence", "topic"]].copy()
     topics.columns = ["file_id", "sentence", "topic"]
     topics["file_id"] = topics["file_id"].astype(str)
     topics["sentence"] = topics["sentence"].astype(str).str.strip()
 
-    # 完全重複行（同じ file_id/sentence/topic）はそのまま集約
+    # Fully identical rows (same file_id/sentence/topic) collapse cleanly.
     topics = topics.drop_duplicates(subset=["file_id", "sentence", "topic"])
 
-    # 同じ (file_id, sentence) で topic 値が食い違う行が残っていれば警告し、
-    # 最初の1件だけ残す（merge を必ず 1 対 1 にするため）
+    # If a (file_id, sentence) still maps to conflicting topic values, warn and
+    # keep the first so the merge stays one-to-one.
     dup_mask = topics.duplicated(subset=["file_id", "sentence"], keep=False)
     if dup_mask.any():
         n_conflicting = topics.loc[dup_mask, ["file_id", "sentence"]].drop_duplicates().shape[0]
-        print(f"⚠️ {n_conflicting} 件の (file_id, sentence) で topic 値が食い違って"
-              f"います。最初の値を採用します。")
+        print(f"⚠️ {n_conflicting} (file_id, sentence) pairs have conflicting topic "
+              f"values; keeping the first.")
         topics = topics.drop_duplicates(subset=["file_id", "sentence"], keep="first")
 
     return topics
@@ -250,10 +244,9 @@ def load_topics(csv_path):
 
 def attach_topics(raw_df, csv_path):
     """
-    raw_df に topic 列を付与する。(file_id, sentence) で結合するため、
-    raw_df 側の file_id も文字列化してから merge する。
-    結合できなかった行数、および merge 前後で行数が変わっていないかを
-    表示し、想定外の欠落・重複増加に気づけるようにする。
+    Add a topic column to raw_df, joining on (file_id, sentence) with file_id
+    cast to str on both sides. Unmatched rows and any change in row count are
+    reported so unexpected losses or fan-out are visible.
     """
     topics = load_topics(csv_path)
     if topics is None:
@@ -268,18 +261,18 @@ def attach_topics(raw_df, csv_path):
     merged = raw_df.merge(topics, on=["file_id", "sentence"], how="left")
     n_after = len(merged)
     if n_after != n_before:
-        print(f"⚠️ merge で行数が {n_before} → {n_after} に変化しました。"
-              f"topic の結合キーが一意でない可能性があります。")
+        print(f"⚠️ Row count changed during merge: {n_before} -> {n_after}. "
+              f"The topic join key may not be unique.")
 
     n_missing = merged["topic"].isna().sum()
     if n_missing:
-        print(f"⚠️ {n_missing} / {len(merged)} 行で topic が結合できませんでした "
-              f"（file_id/sentence の不一致の可能性）。")
+        print(f"⚠️ {n_missing} / {len(merged)} rows could not be matched to a topic "
+              f"(likely a file_id/sentence mismatch).")
     return merged
 
 
 def build_category_summary(raw_df):
-    """動詞×レベル×カテゴリの頻度・割合表を作る。"""
+    """Counts and percentages by verb x level x category."""
     counts = (raw_df.groupby(["verb", "level", "category"])
               .size().reset_index(name="n"))
     totals = (raw_df.groupby(["verb", "level"])
@@ -292,13 +285,15 @@ def build_category_summary(raw_df):
 
 def build_noun_collocates(raw_df):
     """
-    名詞コロケート頻度表（noun + proper_noun + 主カテゴリの coordinated_noun + extra_nouns）。
+    Noun collocate frequencies (noun + proper_noun + primary coordinated_noun +
+    extra_nouns).
 
-    2種類の割合を付与する:
-      pct_of_sentences     : その動詞×レベルの全文数に対する割合
-                              （category_summary の pct と同じ分母。シート間で直接比較可能）
-      pct_within_category  : 名詞コロケート全体に対する割合
-                              （そのレベルで見つかった名詞の中での相対頻度＝ランキングの重み）
+    Two percentages are reported:
+      pct_of_sentences     share of all occurrences for that verb x level; same
+                           denominator as category_summary, so the two sheets are
+                           directly comparable
+      pct_within_category  share of all noun collocates at that level, i.e. the
+                           relative frequency used for ranking
     """
     rows = []
     for _, r in raw_df.iterrows():
@@ -330,11 +325,11 @@ def build_noun_collocates(raw_df):
 
 def build_verbal_complements(raw_df):
     """
-    動名詞・不定詞補文の頻度表（"like playing", "like to play" 等）。
+    Gerund and infinitive complement frequencies ("like playing", "like to play").
 
-    pct_of_sentences     : その動詞×レベルの全文数に対する割合
-    pct_within_category  : 同じ補文タイプ（gerund または infinitive）内での相対頻度
-                            （gerund と infinitive は別の合計に対して計算する）
+    pct_of_sentences     share of all occurrences for that verb x level
+    pct_within_category  share within the same complement type; gerund and
+                         infinitive are normalised against separate totals
     """
     sub = raw_df[raw_df["category"].isin(VERBAL_CATEGORIES) & raw_df["collocate"].notna()]
     if sub.empty:
@@ -362,10 +357,11 @@ def build_verbal_complements(raw_df):
 
 def build_relativization_summary(raw_df):
     """
-    動詞×レベルごとの関係節目的語ギャップ回収（relativized=True）の件数・割合。
-    noun/proper_noun には既に merge 済みだが、独立した現象として集計しておく
-    （関係節化率の A1→A2→B1+ 推移は、動詞ごとの意味拡張タイミングと
-    比較できる独立した統語的シグナルになりうる）。
+    Count and rate of relative-clause object recoveries (relativized=True) by
+    verb x level. These are already folded into noun/proper_noun, but are also
+    reported on their own: the A1 -> A2 -> B1+ trend in relativization is an
+    independent syntactic signal that can be compared with the timing of
+    semantic expansion for each verb.
     """
     total_sents = (raw_df.groupby(["verb", "level"]).size()
                    .reset_index(name="total_sentences"))
@@ -422,8 +418,8 @@ def main():
         verbal_df.to_excel(writer, sheet_name="verbal_complements", index=False)
         relativization_df.to_excel(writer, sheet_name="relativization_summary", index=False)
 
-        # 各シートにフィルタ用のドロップダウンを付けておく（Excel で開いた時点で
-        # そのまま列見出しをクリックしてフィルタできるように）
+        # Add filter dropdowns so every sheet can be filtered from the column
+        # headers as soon as it is opened in Excel.
         for sheet_name, df in [
             ("raw_all", raw_df), ("category_summary", summary_df),
             ("noun_collocates", noun_df), ("verbal_complements", verbal_df),
@@ -432,22 +428,6 @@ def main():
             ws = writer.sheets[sheet_name]
             ws.auto_filter.ref = ws.dimensions
     print(f"\n💾 Saved: {xlsx_path}")
-
-    # 参考: 動詞×レベルごとの「名詞目的語カバー率」を旧版と比較できるよう表示
-    print("\n📊 Coverage check (category = noun/proper_noun/coordinated_noun only, "
-          "i.e. what the OLD collocate_freq.py would have kept):")
-    old_style = summary_df[summary_df["category"].isin(NOUN_CATEGORIES)]
-    old_totals = old_style.groupby(["verb", "level"])[["n", "total"]].sum()
-    old_totals["pct_kept_by_old_script"] = (old_totals["n"] / old_totals["total"] * 100).round(1)
-    print(old_totals.to_string())
-
-    # 参考: 関係節の目的語ギャップから先行詞を回収した件数・割合
-    # （"the bread that I make" 型。noun/proper_noun に merge 済みだが、
-    #   独立した現象としても集計済み。詳細は output/relativization_summary.csv
-    #   および Excel の relativization_summary シートを参照。）
-    print("\n📊 Relative-clause object recoveries (folded into noun/proper_noun, "
-          "also saved as its own sheet/CSV):")
-    print(relativization_df.to_string(index=False))
 
 
 if __name__ == "__main__":
